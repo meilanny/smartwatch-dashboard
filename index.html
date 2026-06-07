@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 Medical & Environment Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #ffffff; text-align: center; padding: 20px; transition: border 0.3s ease; }
+        .container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; margin-top: 30px; }
+        .card { background: #1e1e1e; padding: 20px; border-radius: 12px; width: 250px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h1 { margin-bottom: 5px; }
+        .value { font-size: 3em; font-weight: bold; margin: 10px 0; color: #4CAF50; }
+        .unit { font-size: 0.4em; color: #aaaaaa; }
+        .vitals-value { color: #ff4757; }
+        button { background: #007bff; color: white; border: none; padding: 15px 30px; font-size: 1.2em; border-radius: 8px; cursor: pointer; transition: 0.3s; margin-top: 20px; }
+        button:hover { background: #0056b3; }
+        #status { margin-top: 10px; color: #aaaaaa; }
+        
+        /* Styled Link for Grafana Quick Navigation */
+        .grafana-link { 
+            display: inline-block; 
+            margin-top: 15px; 
+            color: #00d2ff; 
+            text-decoration: none; 
+            font-weight: 600; 
+            border: 1px solid #00d2ff; 
+            padding: 8px 20px; 
+            border-radius: 6px; 
+            transition: 0.3s; 
+        }
+        .grafana-link:hover { 
+            background: #00d2ff; 
+            color: #121212; 
+            box-shadow: 0 0 15px rgba(0, 210, 255, 0.6); 
+        }
+    </style>
+</head>
+<body>
+
+    <h1>ESP32 Health & Environment Dashboard</h1>
+    <button id="connectBtn">Connect to ESP32 via Bluetooth</button>
+    <div id="status">Status: Disconnected</div>
+    
+    <div>
+        <a href="http://localhost:3000" target="_blank" class="grafana-link">📊 Launch Grafana Analytics Workspace</a>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <h3>Heart Rate</h3>
+            <div class="value vitals-value" id="val-hr">-- <span class="unit">BPM</span></div>
+        </div>
+        <div class="card">
+            <h3>SpO2</h3>
+            <div class="value vitals-value" id="val-spo2">-- <span class="unit">%</span></div>
+        </div>
+        <div class="card">
+            <h3>Core Temp</h3>
+            <div class="value vitals-value" id="val-core">-- <span class="unit">°C</span></div>
+        </div>
+        
+        <div class="card">
+            <h3>Room Temp</h3>
+            <div class="value" id="val-rtemp">-- <span class="unit">°C</span></div>
+        </div>
+        <div class="card">
+            <h3>Humidity</h3>
+            <div class="value" id="val-hum">-- <span class="unit">%</span></div>
+        </div>
+        <div class="card">
+            <h3>Pressure</h3>
+            <div class="value" id="val-pres">-- <span class="unit">hPa</span></div>
+        </div>
+		<div class="card" id="pressure-card" style="width: 100%; max-width: 540px; border: 2px solid #555;">
+			<h3>Finger Placement Assistant</h3>
+			<div id="pressure-text" style="font-size: 1.5em; font-weight: bold; margin: 10px 0; color: #aaaaaa;">
+				Waiting for finger...
+			</div>
+			<div style="background: #333; border-radius: 20px; height: 15px; width: 80%; margin: 0 auto; overflow: hidden; display: flex;">
+				<div id="bar-light" style="flex: 1; background: #333; transition: 0.3s;"></div>
+				<div id="bar-perfect" style="flex: 1; background: #333; transition: 0.3s;"></div>
+				<div id="bar-hard" style="flex: 1; background: #333; transition: 0.3s;"></div>
+			</div>
+		</div>
+    </div>
+
+    <script>
+        const connectBtn = document.getElementById('connectBtn');
+        const statusText = document.getElementById('status');
+
+        const bleServiceUUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+        const bleCharacteristicUUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
+        // --- INFLUXDB CONFIGURATION ---
+        const INFLUX_URL = 'http://localhost:8086/api/v2/write';
+        const INFLUX_ORG = 'Stanford University'; 
+        const INFLUX_BUCKET = 'health_metrics'; 
+        const INFLUX_TOKEN = 'dkwZblUJ2Tptjx4KLe-z1RxwdEk2qZyWs0C_gv01RYwrfkw0puPnpw-k653yBNkPf3Mf1jfOBREqsCs_THRa8g=='; 
+
+        // --- AES-128 DECRYPTION SETUP ---
+        // Must match the ESP32 keys precisely
+        const cryptoKeyData = new TextEncoder().encode("1234567890123456"); 
+        const cryptoIV = new TextEncoder().encode("abcdefghijklmnop");
+        let aesCryptoKey = null;
+
+        async function initCrypto() {
+            aesCryptoKey = await window.crypto.subtle.importKey(
+                "raw", cryptoKeyData, { name: "AES-CBC" }, false, ["decrypt"]
+            );
+        }
+        initCrypto(); // Bootstrap the browser cryptographic hardware acceleration
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                statusText.innerText = "Requesting Bluetooth Device...";
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'ESP_M' }],
+                    optionalServices: [bleServiceUUID]
+                });
+
+                statusText.innerText = "Connecting to GATT Server...";
+                const server = await device.gatt.connect();
+
+                statusText.innerText = "Getting Service...";
+                const service = await server.getPrimaryService(bleServiceUUID);
+
+                statusText.innerText = "Getting Characteristic...";
+                const characteristic = await service.getCharacteristic(bleCharacteristicUUID);
+
+                await characteristic.startNotifications();
+                characteristic.addEventListener('characteristicvaluechanged', handleBLEData);
+
+                statusText.innerText = "Status: Connected & Logging Securely! ✅";
+                connectBtn.style.display = "none";
+
+            } catch (error) {
+                console.error(error);
+                statusText.innerText = "Error: " + error.message;
+            }
+        });
+
+        // This function handles the incoming ENCRYPTED stream with 7 data properties
+		
+		async function handleBLEData(event) {
+            const value = event.target.value; 
+            try {
+                if (!aesCryptoKey) return;
+
+                const encryptedBytes = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+                const decryptedBuffer = await window.crypto.subtle.decrypt(
+                    { name: "AES-CBC", iv: cryptoIV }, aesCryptoKey, encryptedBytes
+                );
+                
+                let dataString = new TextDecoder('utf-8').decode(decryptedBuffer);
+                let dataArray = dataString.split(',');
+
+                // 1. Listen for the updated 8-parameter packet
+                if(dataArray.length === 8) {
+                    // (Keep your standard cards 0 through 5 updating normally here...)
+                    document.getElementById('val-hr').innerHTML = dataArray[0] + ' <span class="unit">BPM</span>';
+                    document.getElementById('val-spo2').innerHTML = dataArray[1] + ' <span class="unit">%</span>';
+                    document.getElementById('val-core').innerHTML = dataArray[2] + ' <span class="unit">°C</span>';
+                    document.getElementById('val-rtemp').innerHTML = dataArray[3] + ' <span class="unit">°C</span>';
+                    document.getElementById('val-hum').innerHTML = dataArray[4] + ' <span class="unit">%</span>';
+                    document.getElementById('val-pres').innerHTML = dataArray[5] + ' <span class="unit">hPa</span>';
+
+                    if(dataArray[6].trim() === "1") { document.body.style.border = "6px solid #ff4757"; } 
+                    else { document.body.style.border = "none"; }
+
+                    // 2. Interactive Pressure Assistant Logic
+                    const pState = parseInt(dataArray[7].trim());
+                    const txt = document.getElementById('pressure-text');
+                    const bLight = document.getElementById('bar-light');
+                    const bPerf = document.getElementById('bar-perfect');
+                    const bHard = document.getElementById('bar-hard');
+
+                    // Reset tracking bars to dark grey default
+                    bLight.style.background = "#333"; bPerf.style.background = "#333"; bHard.style.background = "#333";
+
+                    if (pState === 0) {
+                        txt.innerText = "⏳ Place Finger Flat on Sensor";
+                        txt.style.color = "#aaaaaa";
+                    } else if (pState === 1) {
+                        txt.innerText = "⚠️ Unstable Pressure. Hold And Wait, Press Slightly Harder If Not Improving.";
+                        txt.style.color = "#00d2ff";
+                        bLight.style.background = "#00d2ff"; // Neon Cyan
+                    } else if (pState === 2) {
+                        txt.innerText = "✅ Perfect Pressure! Hold Still.";
+                        txt.style.color = "#4CAF50";
+                        bPerf.style.background = "#4CAF50"; // Emerald Green
+                    } else if (pState === 3) {
+                        txt.innerText = "❌ Squeezing Too Hard! Relax Finger.";
+                        txt.style.color = "#ff4757";
+                        bHard.style.background = "#ff4757"; // Crimson Red
+                    }
+
+                    // 3. Post telemetry data packet to InfluxDB (include placement_quality)
+                    const influxData = `vitals heart_rate=${dataArray[0]},spo2=${dataArray[1]},core_temp=${dataArray[2]},alarm_state=${dataArray[6]},placement_quality=${pState}\nenvironment room_temp=${dataArray[3]},humidity=${dataArray[4]},pressure=${dataArray[5]}`;
+
+                    fetch(`${INFLUX_URL}?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=s`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Token ${INFLUX_TOKEN}`, 'Content-Type': 'text/plain; charset=utf-8' },
+                        body: influxData
+                    }).catch(error => console.error('Error writing to InfluxDB:', error));
+                }
+            } catch (cryptoError) {
+                console.error("Decryption broken:", cryptoError);
+            }
+        }
+		
+    </script>
+</body>
+</html>
